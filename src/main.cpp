@@ -24,7 +24,7 @@ TaskHandle_t writeWavTask;
 hw_timer_t *adcTimer = NULL;
 
 // ADC values
-#define ADC_SAMPLES_COUNT 10000
+#define ADC_SAMPLES_COUNT (16384)
 int abuf[ADC_SAMPLES_COUNT];
 int32_t abufPos = 0;
 
@@ -33,12 +33,6 @@ WAVFILE *wf;
 WavFileResult error;
 char wavfile_error_buf[BUFSIZ];
 int record_time_ms = 10000;
-
-// SD card
-#define MOSI gpio_num_t(15)
-#define MISO gpio_num_t(2)
-#define SCK gpio_num_t(14)
-#define SD_CS gpio_num_t(13)
 
 // https://www.toptal.com/embedded/esp32-audio-sampling
 int IRAM_ATTR local_adc1_read(int channel) {
@@ -86,7 +80,7 @@ void writeWav(void *param) {
         ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
 
         // save work buffer first
-        memcpy(wbuf, abuf, ADC_SAMPLES_COUNT * sizeof(int));
+        // memcpy(wbuf, abuf, ADC_SAMPLES_COUNT * sizeof(int));
         log_d("writing block %i", block_num++);
 
         // consume buffer
@@ -132,13 +126,10 @@ void setup() {
     Serial.begin(115200);
     log_v("ESP32 Recorder");
 
-    // SD SPI config
-    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
-    sdspi_slot_config_t slot_config = SDSPI_SLOT_CONFIG_DEFAULT();
-    slot_config.gpio_miso = MISO;
-    slot_config.gpio_mosi = MOSI;
-    slot_config.gpio_sck = SCK;
-    slot_config.gpio_cs = SD_CS;
+    // SDMMC mode
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.max_freq_khz = SDMMC_FREQ_52M;
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
     // FS config
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -154,6 +145,9 @@ void setup() {
         log_e("SD card mount failed (%i): %s\n", err, err_msg);
         return;
     }
+
+    // print info
+    sdmmc_card_print_info(stdout, card);
 
     // find wav path
     char wavFilePath[128];
