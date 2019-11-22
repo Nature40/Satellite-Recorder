@@ -25,10 +25,8 @@ hw_timer_t *adcTimer = NULL;
 
 // ADC values
 #define ADC_SAMPLES_COUNT 10000
-#define ADC_SAMPLES_FLUSH 1000
 int abuf[ADC_SAMPLES_COUNT];
-int64_t abufPosWrite = 0;
-int64_t abufPosRead = 0;
+int32_t abufPos = 0;
 
 // Wavfile
 WAVFILE *wf;
@@ -60,63 +58,55 @@ void IRAM_ATTR onTimer() {
     portENTER_CRITICAL_ISR(&timerMux);
 
     // read adc and add to ringbuffer
-    abuf[abufPosWrite % ADC_SAMPLES_COUNT] = local_adc1_read(ADC1_CHANNEL_0);
-    abufPosWrite++;
+    // abuf[abufPos++] = adc1_get_raw(ADC1_CHANNEL_0);
+    abuf[abufPos++] = local_adc1_read(ADC1_CHANNEL_0);
 
-    // flush sometimes
-    if ((abufPosWrite % ADC_SAMPLES_FLUSH) == 0) {
-        log_d("sample: %d, target 2048",
-              abuf[(abufPosWrite - 1) % ADC_SAMPLES_COUNT]);
+    if (abufPos >= ADC_SAMPLES_COUNT) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
         if (xHigherPriorityTaskWoken) {
             portYIELD_FROM_ISR();
         }
-    }
 
-    // if ((abufPosWrite % ADC_SAMPLES_COUNT) == 0) {
-    //     log_d("read %d samples", abufPosWrite);
-    // }
+        abufPos = 0;
+    }
 
     portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 void writeWav(void *param) {
+    int wbuf[ADC_SAMPLES_COUNT];
     wavfile_data_t wav_buf;
     wav_buf.num_channels = 1;
+    int block_num = 0;
 
     while (true) {
         // Sleep until notification (one second timeout)
         // uint32_t tcount =
         ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
 
-        // if the buffer contains new values, read
-        while (abufPosRead < abufPosWrite) {
-            // write data to wav
-            int val = abuf[abufPosRead % ADC_SAMPLES_COUNT];
-            wav_buf.channel_data[0] = (((double)val) / 0x0FFF);
-            WavFileResult error = wavfile_write_data(wf, &wav_buf);
+        // save work buffer first
+        memcpy(wbuf, abuf, ADC_SAMPLES_COUNT * sizeof(int));
+        log_d("writing block %i", block_num++);
 
+        // consume buffer
+        for (int i = 0; i < ADC_SAMPLES_COUNT; i++) {
+            wav_buf.channel_data[0] = (((double)abuf[i]) / 0x0FFF);
+
+            WavFileResult error = wavfile_write_data(wf, &wav_buf);
             if (error) {
                 wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
                 log_e("error writing data: %s", wavfile_error_buf);
                 timerAlarmDisable(adcTimer);
             }
+        }
 
-            abufPosRead++;
-
-            if ((abufPosRead % ADC_SAMPLES_COUNT) == 0) {
-                // log_d("wrote %d samples", abufPosRead);
-                // log_d("Example: %d", wav_buf.channel_data[0]);
-            }
-
-            // end recording after some time
-            if (millis() > record_time_ms) {
-                log_i("Recording finished.");
-                timerAlarmDisable(adcTimer);
-                wavfile_close(wf);
-                return;
-            }
+        // end recording after some time
+        if (millis() > record_time_ms) {
+            log_i("Recording finished.");
+            timerAlarmDisable(adcTimer);
+            wavfile_close(wf);
+            return;
         }
     }
 }
