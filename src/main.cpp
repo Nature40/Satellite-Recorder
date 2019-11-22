@@ -42,16 +42,31 @@ int record_time_ms = 10000;
 #define SCK gpio_num_t(14)
 #define SD_CS gpio_num_t(13)
 
+// https://www.toptal.com/embedded/esp32-audio-sampling
+int IRAM_ATTR local_adc1_read(int channel) {
+    uint16_t adc_value;
+    SENS.sar_meas_start1.sar1_en_pad = (1 << channel);
+    while (SENS.sar_slave_addr1.meas_status != 0)
+        ;
+    SENS.sar_meas_start1.meas1_start_sar = 0;
+    SENS.sar_meas_start1.meas1_start_sar = 1;
+    while (SENS.sar_meas_start1.meas1_done_sar == 0)
+        ;
+    adc_value = SENS.sar_meas_start1.meas1_data_sar;
+    return adc_value;
+}
+
 void IRAM_ATTR onTimer() {
     portENTER_CRITICAL_ISR(&timerMux);
 
     // read adc and add to ringbuffer
-    abuf[abufPosWrite % ADC_SAMPLES_COUNT] = adc1_get_raw(ADC1_CHANNEL_0);
+    abuf[abufPosWrite % ADC_SAMPLES_COUNT] = local_adc1_read(ADC1_CHANNEL_0);
     abufPosWrite++;
 
     // flush sometimes
     if ((abufPosWrite % ADC_SAMPLES_FLUSH) == 0) {
-        log_d("sample: %d", abuf[(abufPosWrite - 1) % ADC_SAMPLES_COUNT]);
+        log_d("sample: %d, target 2048",
+              abuf[(abufPosWrite - 1) % ADC_SAMPLES_COUNT]);
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
         if (xHigherPriorityTaskWoken) {
@@ -184,6 +199,7 @@ void setup() {
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
     // adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_11);
+    adc1_get_raw(ADC1_CHANNEL_0);
 
     // ## Setup sound recorder
     xTaskCreate(writeWav, "Write WAV", 8192, NULL, 1, &writeWavTask);
