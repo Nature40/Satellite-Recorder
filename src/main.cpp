@@ -25,8 +25,8 @@ hw_timer_t *adcTimer = NULL;
 
 // ADC values
 #define ADC_SAMPLES_COUNT 10000
-#define ADC_SAMPLES_FLUSH 10000
-double abuf[ADC_SAMPLES_COUNT];
+#define ADC_SAMPLES_FLUSH 1000
+int abuf[ADC_SAMPLES_COUNT];
 int64_t abufPosWrite = 0;
 int64_t abufPosRead = 0;
 
@@ -49,24 +49,19 @@ void IRAM_ATTR onTimer() {
     abuf[abufPosWrite % ADC_SAMPLES_COUNT] = adc1_get_raw(ADC1_CHANNEL_0);
     abufPosWrite++;
 
-    // // reset ringbuffer write index
-    // if (abufPosWrite >= ADC_SAMPLES_COUNT) {
-    //     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    //     vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
-    //     if (xHigherPriorityTaskWoken) {
-    //         portYIELD_FROM_ISR();
-    //     }
-    // }
-
     // flush sometimes
     if ((abufPosWrite % ADC_SAMPLES_FLUSH) == 0) {
-        log_d("Read %d samples", abufPosWrite);
+        log_d("sample: %d", abuf[(abufPosWrite - 1) % ADC_SAMPLES_COUNT]);
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
         if (xHigherPriorityTaskWoken) {
             portYIELD_FROM_ISR();
         }
     }
+
+    // if ((abufPosWrite % ADC_SAMPLES_COUNT) == 0) {
+    //     log_d("read %d samples", abufPosWrite);
+    // }
 
     portEXIT_CRITICAL_ISR(&timerMux);
 }
@@ -82,10 +77,11 @@ void writeWav(void *param) {
 
         // if the buffer contains new values, read
         while (abufPosRead < abufPosWrite) {
-
             // write data to wav
-            wav_buf.channel_data[0] = abuf[abufPosRead];
+            int val = abuf[abufPosRead % ADC_SAMPLES_COUNT];
+            wav_buf.channel_data[0] = (((double)val) / 0x0FFF);
             WavFileResult error = wavfile_write_data(wf, &wav_buf);
+
             if (error) {
                 wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
                 log_e("error writing data: %s", wavfile_error_buf);
@@ -94,9 +90,9 @@ void writeWav(void *param) {
 
             abufPosRead++;
 
-            if ((abufPosRead % ADC_SAMPLES_FLUSH) == 0) {
-                log_d("Written %d samples to SD", abufPosRead);
-                log_d("Example: %d", wav_buf.channel_data[0]);
+            if ((abufPosRead % ADC_SAMPLES_COUNT) == 0) {
+                // log_d("wrote %d samples", abufPosRead);
+                // log_d("Example: %d", wav_buf.channel_data[0]);
             }
 
             // end recording after some time
@@ -187,6 +183,7 @@ void setup() {
     // configure adc
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
+    // adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_11);
 
     // ## Setup sound recorder
     xTaskCreate(writeWav, "Write WAV", 8192, NULL, 1, &writeWavTask);
