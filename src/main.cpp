@@ -25,7 +25,7 @@ hw_timer_t *adcTimer = NULL;
 
 // ADC values
 #define ADC_SAMPLES_COUNT (16384)
-int abuf[ADC_SAMPLES_COUNT];
+uint16_t abuf[ADC_SAMPLES_COUNT];
 int32_t abufPos = 0;
 
 // Wavfile
@@ -35,7 +35,7 @@ char wavfile_error_buf[BUFSIZ];
 int record_time_ms = 10000;
 
 // https://www.toptal.com/embedded/esp32-audio-sampling
-int IRAM_ATTR local_adc1_read(int channel) {
+uint16_t IRAM_ATTR adc1_get_raw_local(int channel) {
     uint16_t adc_value;
     SENS.sar_meas_start1.sar1_en_pad = (1 << channel);
     while (SENS.sar_slave_addr1.meas_status != 0)
@@ -53,14 +53,13 @@ void IRAM_ATTR onTimer() {
 
     // read adc and add to ringbuffer
     // abuf[abufPos++] = adc1_get_raw(ADC1_CHANNEL_0);
-    abuf[abufPos++] = local_adc1_read(ADC1_CHANNEL_0);
+    abuf[abufPos++] = adc1_get_raw_local(ADC1_CHANNEL_0);
 
     if (abufPos >= ADC_SAMPLES_COUNT) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
         vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken) {
+        if (xHigherPriorityTaskWoken)
             portYIELD_FROM_ISR();
-        }
 
         abufPos = 0;
     }
@@ -69,9 +68,9 @@ void IRAM_ATTR onTimer() {
 }
 
 void writeWav(void *param) {
-    int wbuf[ADC_SAMPLES_COUNT];
-    wavfile_data_t wav_buf;
-    wav_buf.num_channels = 1;
+    // int wbuf[ADC_SAMPLES_COUNT];
+    // wavfile_data_t wav_buf;
+    // wav_buf.num_channels = 1;
     int block_num = 0;
 
     while (true) {
@@ -79,21 +78,11 @@ void writeWav(void *param) {
         // uint32_t tcount =
         ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
 
-        // save work buffer first
-        // memcpy(wbuf, abuf, ADC_SAMPLES_COUNT * sizeof(int));
+        fwrite(abuf, sizeof(uint16_t), ADC_SAMPLES_COUNT, wf->fp);
+        wf->data_byte_count += 2 * ADC_SAMPLES_COUNT;
+        wf->data_checked = true;
+
         log_d("writing block %i", block_num++);
-
-        // consume buffer
-        for (int i = 0; i < ADC_SAMPLES_COUNT; i++) {
-            wav_buf.channel_data[0] = (((double)abuf[i]) / 0x0FFF);
-
-            WavFileResult error = wavfile_write_data(wf, &wav_buf);
-            if (error) {
-                wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
-                log_e("error writing data: %s", wavfile_error_buf);
-                timerAlarmDisable(adcTimer);
-            }
-        }
 
         // end recording after some time
         if (millis() > record_time_ms) {
@@ -128,7 +117,7 @@ void setup() {
 
     // SDMMC mode
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.max_freq_khz = SDMMC_FREQ_52M;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
     // FS config

@@ -36,27 +36,32 @@
 #ifndef WAVFILE_H
 #define WAVFILE_H
 
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#define WAVFILE_AUDIO_FORMAT_PCM            (1)
-#define WAVFILE_AUDIO_FORMAT_EXTENSIBLE     (65534)
-#define WAVFILE_MAXIMUM_CHANNELS            (32)
+#define WAVFILE_AUDIO_FORMAT_PCM (1)
+#define WAVFILE_AUDIO_FORMAT_EXTENSIBLE (65534)
+#define WAVFILE_MAXIMUM_CHANNELS (32)
 
-#define WAVFILE_INFO_AUDIO_FORMAT(P)        ((P)->audio_format)
-#define WAVFILE_INFO_NUM_CHANNELS(P)        ((P)->num_channels)
-#define WAVFILE_INFO_SAMPLE_RATE(P)         ((P)->sample_rate)
-#define WAVFILE_INFO_BYTE_RATE(P)           ((P)->byte_rate)
-#define WAVFILE_INFO_BLOCK_ALIGN(P)         ((P)->block_align)
-#define WAVFILE_INFO_BITS_PER_SAMPLE(P)     ((P)->bits_per_sample)
+#define WAVFILE_INFO_AUDIO_FORMAT(P) ((P)->audio_format)
+#define WAVFILE_INFO_NUM_CHANNELS(P) ((P)->num_channels)
+#define WAVFILE_INFO_SAMPLE_RATE(P) ((P)->sample_rate)
+#define WAVFILE_INFO_BYTE_RATE(P) ((P)->byte_rate)
+#define WAVFILE_INFO_BLOCK_ALIGN(P) ((P)->block_align)
+#define WAVFILE_INFO_BITS_PER_SAMPLE(P) ((P)->bits_per_sample)
 
-#define WAVFILE_DATA_IS_END_OF_DATA(P)      ((P)->num_channels == 0)
-#define WAVFILE_DATA_NUM_CHANNELS(P)        ((P)->num_channels)
-#define WAVFILE_DATA_CHANNEL_DATA(P,CH)     ((P)->channel_data[CH])
+#define WAVFILE_DATA_IS_END_OF_DATA(P) ((P)->num_channels == 0)
+#define WAVFILE_DATA_NUM_CHANNELS(P) ((P)->num_channels)
+#define WAVFILE_DATA_CHANNEL_DATA(P, CH) ((P)->channel_data[CH])
 
-#define WAVFILE_DEBUG_ENABLED               (0)
+#define WAVFILE_DEBUG_ENABLED (0)
 
-typedef struct WAVFILE WAVFILE;
+/**
+ */
+enum WavFileMode {
+    WavFileModeRead,
+    WavFileModeWrite,
+};
 
 typedef struct {
     uint16_t audio_format;
@@ -66,6 +71,16 @@ typedef struct {
     uint16_t block_align;
     uint16_t bits_per_sample;
 } wavfile_info_t;
+
+struct WAVFILE {
+    FILE *fp;
+    char filename[BUFSIZ];
+    WavFileMode mode;
+    bool info_checked;
+    bool data_checked;
+    uint32_t data_byte_count;
+    wavfile_info_t info;
+};
 
 typedef struct {
     uint16_t num_channels;
@@ -104,20 +119,15 @@ enum WavFileResult {
     WavFileResultErrorInvalidHandler,
 };
 
-/**
- */
-enum WavFileMode {
-    WavFileModeRead,
-    WavFileModeWrite,
-};
-
-WAVFILE *wavfile_open(const char *filename, WavFileMode mode, WavFileResult *result);
+WAVFILE *wavfile_open(const char *filename, WavFileMode mode,
+                      WavFileResult *result);
 WavFileResult wavfile_read_info(WAVFILE *p, wavfile_info_t *info);
 WavFileResult wavfile_read_data(WAVFILE *p, wavfile_data_t *data);
 WavFileResult wavfile_write_info(WAVFILE *p, const wavfile_info_t *info);
 WavFileResult wavfile_write_data(WAVFILE *p, const wavfile_data_t *data);
+WavFileResult wavfile_write_raw_16(WAVFILE *p, uint16_t num_channels,
+                                   int *data);
 WavFileResult wavfile_close(WAVFILE *p);
 void wavfile_result_string(const WavFileResult result, char *buf, size_t siz);
 
 #endif
-
