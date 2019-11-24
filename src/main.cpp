@@ -6,6 +6,7 @@
 #include <Arduino.h>
 #include <FreeRTOS.h>
 #include <driver/adc.h>
+#include <driver/i2s.h>
 #include <driver/sdmmc_host.h>
 #include <driver/sdspi_host.h>
 #include <esp_err.h>
@@ -18,86 +19,72 @@
 
 #include "wavfile.h"
 
-// Timer
-portMUX_TYPE DRAM_ATTR timerMux = portMUX_INITIALIZER_UNLOCKED;
-TaskHandle_t writeWavTask;
-hw_timer_t *adcTimer = NULL;
+#define SAMPLE_RATE (48000)
+#define SAMPLE_DEPTH I2S_BITS_PER_SAMPLE_16BIT
+#define BUFFER_SIZE (SAMPLE_RATE)
+#define BUFFER_BYTES (BUFFER_SIZE * SAMPLE_DEPTH / 8)
 
-// ADC values
-#define ADC_SAMPLES_COUNT (16384)
-uint16_t abuf[ADC_SAMPLES_COUNT];
-int32_t abufPos = 0;
+// I2S driver
+i2s_config_t i2s_config = {
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+    .sample_rate = SAMPLE_RATE,
+    .bits_per_sample = SAMPLE_DEPTH,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_I2S_MSB,
+    .intr_alloc_flags = 0,
+    .dma_buf_count = 8,
+    .dma_buf_len = 1024,
+    .use_apll = 1,
+};
+
+// wav info
+wavfile_info_t info = {
+    .audio_format = 1,
+    .num_channels = 1,
+    .sample_rate = SAMPLE_RATE,
+    .byte_rate = SAMPLE_RATE * (SAMPLE_DEPTH / 8),
+    .block_align = 2,
+    .bits_per_sample = SAMPLE_DEPTH,
+};
+
+// sd mount options
+esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+    .format_if_mount_failed = false,
+    .max_files = 5,
+    .allocation_unit_size = 16 * 1024,
+};
 
 // Wavfile
 WAVFILE *wf;
 WavFileResult error;
 char wavfile_error_buf[BUFSIZ];
-int record_time_ms = 10000;
 
-// https://www.toptal.com/embedded/esp32-audio-sampling
-uint16_t IRAM_ATTR adc1_get_raw_local(int channel) {
-    uint16_t adc_value;
-    SENS.sar_meas_start1.sar1_en_pad = (1 << channel);
-    while (SENS.sar_slave_addr1.meas_status != 0)
-        ;
-    SENS.sar_meas_start1.meas1_start_sar = 0;
-    SENS.sar_meas_start1.meas1_start_sar = 1;
-    while (SENS.sar_meas_start1.meas1_done_sar == 0)
-        ;
-    adc_value = SENS.sar_meas_start1.meas1_data_sar;
-    return adc_value;
-}
+void i2s_record(void *arg) {
+    size_t bytes_read;
 
-void IRAM_ATTR onTimer() {
-    // portENTER_CRITICAL_ISR(&timerMux);
+    uint16_t i2s_read_buff[BUFFER_SIZE];
+    long start_ts = millis();
 
-    // read adc and add to ringbuffer
-    // abuf[abufPos++] = adc1_get_raw(ADC1_CHANNEL_0);
-    // abuf[abufPos++] = adc1_get_raw_local(ADC1_CHANNEL_0);
+    i2s_adc_enable(I2S_NUM_0);
+    for (int i = 0; i < 100; i++) {
+        i2s_read(I2S_NUM_0, &i2s_read_buff, BUFFER_BYTES, &bytes_read,
+                 portMAX_DELAY);
 
-    SENS.sar_meas_start1.meas1_start_sar = 1;
-    while (SENS.sar_meas_start1.meas1_done_sar == 0)
-        ;
-    abuf[abufPos++] = SENS.sar_meas_start1.meas1_data_sar;
-    SENS.sar_meas_start1.meas1_start_sar = 0;
+        log_i("%05lu: read %u bytes via I2S, samples: %i %i %i ... %i",
+              millis() - start_ts, bytes_read, i2s_read_buff[0],
+              i2s_read_buff[1], i2s_read_buff[2],
+              i2s_read_buff[BUFFER_SIZE - 1]);
 
-    if (abufPos >= ADC_SAMPLES_COUNT) {
-        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-        vTaskNotifyGiveFromISR(writeWavTask, &xHigherPriorityTaskWoken);
-        if (xHigherPriorityTaskWoken)
-            portYIELD_FROM_ISR();
-
-        abufPos = 0;
-    }
-
-    // portEXIT_CRITICAL_ISR(&timerMux);
-}
-
-void writeWav(void *param) {
-    // int wbuf[ADC_SAMPLES_COUNT];
-    // wavfile_data_t wav_buf;
-    // wav_buf.num_channels = 1;
-    int block_num = 0;
-
-    while (true) {
-        // Sleep until notification (one second timeout)
-        // uint32_t tcount =
-        ulTaskNotifyTake(pdFALSE, pdMS_TO_TICKS(1000));
-
-        fwrite(abuf, sizeof(uint16_t), ADC_SAMPLES_COUNT, wf->fp);
-        wf->data_byte_count += 2 * ADC_SAMPLES_COUNT;
+        fwrite(i2s_read_buff, bytes_read, 1, wf->fp);
+        wf->data_byte_count += bytes_read;
         wf->data_checked = true;
-
-        log_d("writing block %i", block_num++);
-
-        // end recording after some time
-        if (millis() > record_time_ms) {
-            log_i("Recording finished.");
-            timerAlarmDisable(adcTimer);
-            wavfile_close(wf);
-            return;
-        }
     }
+    i2s_adc_disable(I2S_NUM_0);
+
+    log_i("Recording finished.");
+    wavfile_close(wf);
+
+    vTaskDelete(NULL);
 }
 
 int findWavPath(char *wavFilePath, size_t len) {
@@ -121,17 +108,12 @@ void setup() {
     Serial.begin(115200);
     log_v("ESP32 Recorder");
 
-    // SDMMC mode
+    // setup SDMMC
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
-    // FS config
-    esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024};
-
+    // mount FS
     sdmmc_card_t *card;
     esp_err_t err = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config,
                                             &mount_config, &card);
@@ -139,10 +121,9 @@ void setup() {
         const char *err_msg = esp_err_to_name(err);
         log_e("SD card mount failed (%i): %s\n", err, err_msg);
         return;
+    } else {
+        sdmmc_card_print_info(stdout, card);
     }
-
-    // print info
-    sdmmc_card_print_info(stdout, card);
 
     // find wav path
     char wavFilePath[128];
@@ -151,15 +132,6 @@ void setup() {
     }
 
     // init wavfile
-    wavfile_info_t info;
-    info.audio_format = 1;
-    WAVFILE_INFO_AUDIO_FORMAT(&info) = 1;
-    WAVFILE_INFO_NUM_CHANNELS(&info) = 1;
-    WAVFILE_INFO_SAMPLE_RATE(&info) = 62500;
-    WAVFILE_INFO_BYTE_RATE(&info) = 125000;
-    WAVFILE_INFO_BLOCK_ALIGN(&info) = 2;
-    WAVFILE_INFO_BITS_PER_SAMPLE(&info) = 16;
-
     wf = wavfile_open(wavFilePath, WavFileModeWrite, &error);
     if (error) {
         wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
@@ -174,24 +146,18 @@ void setup() {
         return;
     }
 
-    // configure adc
+    // install and start i2s driver
+    esp_log_level_set("I2S", ESP_LOG_INFO);
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+
+    // init ADC pad
+    i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_0);
+    i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, SAMPLE_DEPTH, I2S_CHANNEL_MONO);
+
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
-    // adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_11);
-    adc1_get_raw(ADC1_CHANNEL_0);
 
-    // ## Setup sound recorder
-    xTaskCreate(writeWav, "Write WAV", 8192, NULL, 1, &writeWavTask);
-
-    // 80 MHz / 80 = 1 MHz hardware clock for easy figuring
-    adcTimer = timerBegin(3, 80, true);
-
-    // Attaches the handler function to the timer
-    timerAttachInterrupt(adcTimer, &onTimer, true);
-
-    // Interrupts when counter == 50, i.e. 20.000 times a second
-    timerAlarmWrite(adcTimer, 16, true);
-    timerAlarmEnable(adcTimer);
+    xTaskCreate(i2s_record, "i2s_record", BUFFER_BYTES + 2048, NULL, 5, NULL);
 
     log_i("Init completed.");
 }
