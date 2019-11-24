@@ -49,11 +49,17 @@ uint16_t IRAM_ATTR adc1_get_raw_local(int channel) {
 }
 
 void IRAM_ATTR onTimer() {
-    portENTER_CRITICAL_ISR(&timerMux);
+    // portENTER_CRITICAL_ISR(&timerMux);
 
     // read adc and add to ringbuffer
     // abuf[abufPos++] = adc1_get_raw(ADC1_CHANNEL_0);
-    abuf[abufPos++] = adc1_get_raw_local(ADC1_CHANNEL_0);
+    // abuf[abufPos++] = adc1_get_raw_local(ADC1_CHANNEL_0);
+
+    SENS.sar_meas_start1.meas1_start_sar = 1;
+    while (SENS.sar_meas_start1.meas1_done_sar == 0)
+        ;
+    abuf[abufPos++] = SENS.sar_meas_start1.meas1_data_sar;
+    SENS.sar_meas_start1.meas1_start_sar = 0;
 
     if (abufPos >= ADC_SAMPLES_COUNT) {
         BaseType_t xHigherPriorityTaskWoken = pdFALSE;
@@ -64,7 +70,7 @@ void IRAM_ATTR onTimer() {
         abufPos = 0;
     }
 
-    portEXIT_CRITICAL_ISR(&timerMux);
+    // portEXIT_CRITICAL_ISR(&timerMux);
 }
 
 void writeWav(void *param) {
@@ -149,8 +155,8 @@ void setup() {
     info.audio_format = 1;
     WAVFILE_INFO_AUDIO_FORMAT(&info) = 1;
     WAVFILE_INFO_NUM_CHANNELS(&info) = 1;
-    WAVFILE_INFO_SAMPLE_RATE(&info) = 20000;
-    WAVFILE_INFO_BYTE_RATE(&info) = 40000;
+    WAVFILE_INFO_SAMPLE_RATE(&info) = 62500;
+    WAVFILE_INFO_BYTE_RATE(&info) = 125000;
     WAVFILE_INFO_BLOCK_ALIGN(&info) = 2;
     WAVFILE_INFO_BITS_PER_SAMPLE(&info) = 16;
 
@@ -184,7 +190,7 @@ void setup() {
     timerAttachInterrupt(adcTimer, &onTimer, true);
 
     // Interrupts when counter == 50, i.e. 20.000 times a second
-    timerAlarmWrite(adcTimer, 50, true);
+    timerAlarmWrite(adcTimer, 16, true);
     timerAlarmEnable(adcTimer);
 
     log_i("Init completed.");
