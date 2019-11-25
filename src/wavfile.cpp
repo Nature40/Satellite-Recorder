@@ -50,6 +50,7 @@
 #define BITS_PER_SAMPLE_8 (8)
 #define BITS_PER_SAMPLE_16 (16)
 #define BITS_PER_SAMPLE_24 (24)
+#define BITS_PER_SAMPLE_32 (32)
 
 #define CHUNK_SIZE_FMT_PCM (16)
 #define CHUNK_SIZE_FMT_EXTENSIBLE (40)
@@ -595,7 +596,8 @@ WavFileResult wavfile_write_info(WAVFILE *p, const wavfile_info_t *info) {
 
     if ((info->bits_per_sample != BITS_PER_SAMPLE_8) &&
         (info->bits_per_sample != BITS_PER_SAMPLE_16) &&
-        (info->bits_per_sample != BITS_PER_SAMPLE_24)) {
+        (info->bits_per_sample != BITS_PER_SAMPLE_24) &&
+        (info->bits_per_sample != BITS_PER_SAMPLE_32)) {
         result = WavFileResultErrorUnsupportedBitsPerSample;
         goto finalize;
     }

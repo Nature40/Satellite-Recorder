@@ -12,6 +12,7 @@
 #include <esp_err.h>
 #include <esp_vfs_fat.h>
 #include <sdmmc_cmd.h>
+#include <soc/i2s_reg.h>
 #include <soc/sens_reg.h>
 #include <soc/sens_struct.h>
 #include <sys/stat.h>
@@ -19,14 +20,14 @@
 
 #include "wavfile.h"
 
-#define SAMPLE_RATE (500000)
-#define SAMPLE_DEPTH I2S_BITS_PER_SAMPLE_16BIT
-#define BUFFER_SIZE (50000)
+#define SAMPLE_RATE (64000)
+#define SAMPLE_DEPTH I2S_BITS_PER_SAMPLE_32BIT
+#define BUFFER_SIZE (16 * 1024)
 #define BUFFER_BYTES (BUFFER_SIZE * (SAMPLE_DEPTH / 8))
 
 // I2S driver
 i2s_config_t i2s_config = {
-    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX | I2S_MODE_ADC_BUILT_IN),
+    .mode = i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SAMPLE_RATE,
     .bits_per_sample = SAMPLE_DEPTH,
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
@@ -34,7 +35,7 @@ i2s_config_t i2s_config = {
     .intr_alloc_flags = 0,
     .dma_buf_count = 8,
     .dma_buf_len = 1024,
-    // .use_apll = 1,
+    .use_apll = false,
     // .tx_desc_auto_clear = true,
     // .fixed_mclk = SAMPLE_RATE,
 };
@@ -49,9 +50,16 @@ wavfile_info_t info = {
     .bits_per_sample = SAMPLE_DEPTH,
 };
 
+i2s_pin_config_t pin_config = {
+    .bck_io_num = 33,   // IIS_SCLK
+    .ws_io_num = 32,    // IIS_LCLK
+    .data_out_num = -1, // IIS_DSIN
+    .data_in_num = 35,  // IIS_DOUT
+};
+
 // sd mount options
-esp_vfs_fat_sdmmc_mount_config_t mount_config = {
-    .format_if_mount_failed = false,
+static const esp_vfs_fat_sdmmc_mount_config_t mount_config = {
+    .format_if_mount_failed = true,
     .max_files = 5,
     .allocation_unit_size = 16 * 1024,
 };
@@ -61,17 +69,17 @@ typedef struct {
     time_t duration_s;
 } i2s_record_params_t;
 
+esp_err_t err;
+
 void i2s_record(void *arg) {
     i2s_record_params_t *rec = (i2s_record_params_t *)arg;
 
-    uint16_t i2s_read_buff[BUFFER_SIZE];
+    uint32_t i2s_read_buff[BUFFER_SIZE];
     size_t bytes_read;
 
     size_t bytes_missing = rec->duration_s * SAMPLE_RATE * SAMPLE_DEPTH / 8;
     log_i("Recording %u seconds, %lu bytes, buffer %p", rec->duration_s,
           bytes_missing, i2s_read_buff);
-
-    i2s_adc_enable(I2S_NUM_0);
 
     while (bytes_missing > 0) {
         // record BUFFER_BYTES at maximum or the missing bytes
@@ -81,10 +89,14 @@ void i2s_record(void *arg) {
         log_i("trying to read %u bytes", bytes_read);
 
         // read the values
-        i2s_read(I2S_NUM_0, &i2s_read_buff, bytes_read, &bytes_read,
-                 portMAX_DELAY);
+        err = i2s_read(I2S_NUM_0, &i2s_read_buff, bytes_read, &bytes_read,
+                       portMAX_DELAY);
+        if (err != ESP_OK) {
+            log_e("Error reading i2s: %s", esp_err_to_name(err));
+            continue;
+        }
 
-        log_i("read %u bytes via I2S, samples: %i %i %i ... %i", bytes_read,
+        log_i("read %u bytes via I2S, samples: %u %u %u ... %u", bytes_read,
               i2s_read_buff[0], i2s_read_buff[1], i2s_read_buff[2],
               i2s_read_buff[(bytes_read / (SAMPLE_DEPTH * 8)) - 1]);
 
@@ -95,8 +107,6 @@ void i2s_record(void *arg) {
 
         bytes_missing -= bytes_read;
     }
-
-    i2s_adc_disable(I2S_NUM_0);
 
     log_i("Recording finished, wrote %u bytes total",
           rec->wav->data_byte_count);
@@ -127,14 +137,24 @@ TaskHandle_t start_record(char *file_path, time_t duration_s) {
         return task;
     }
 
-    // install and start i2s driver
-    esp_log_level_set("I2S", ESP_LOG_INFO);
-    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    gpio_set_direction(gpio_num_t(pin_config.data_in_num), GPIO_MODE_INPUT);
+    gpio_set_direction(gpio_num_t(pin_config.bck_io_num), GPIO_MODE_OUTPUT);
+    gpio_set_direction(gpio_num_t(pin_config.ws_io_num), GPIO_MODE_OUTPUT);
 
-    // init ADC pad
-    i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_0);
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
+    err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+    if (err != ESP_OK) {
+        log_e("Failed installing driver: %d\n", err);
+        return task;
+    }
+
+    REG_SET_BIT(I2S_TIMING_REG(I2S_NUM_0), BIT(9));
+    REG_SET_BIT(I2S_CONF_REG(I2S_NUM_0), I2S_RX_MSB_SHIFT);
+    err = i2s_set_pin(I2S_NUM_0, &pin_config);
+    if (err != ESP_OK) {
+        log_e("Failed setting pin: %d\n", err);
+        return task;
+    }
+    log_i("I2S driver installed.");
 
     // init array
     i2s_record_params_t *params =
