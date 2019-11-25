@@ -21,7 +21,7 @@
 
 #define SAMPLE_RATE (500000)
 #define SAMPLE_DEPTH I2S_BITS_PER_SAMPLE_16BIT
-#define BUFFER_SIZE (20000)
+#define BUFFER_SIZE (50000)
 #define BUFFER_BYTES (BUFFER_SIZE * (SAMPLE_DEPTH / 8))
 
 // I2S driver
@@ -56,18 +56,19 @@ esp_vfs_fat_sdmmc_mount_config_t mount_config = {
     .allocation_unit_size = 16 * 1024,
 };
 
-// Wavfile
-WAVFILE *wf;
-WavFileResult error;
-char wavfile_error_buf[BUFSIZ];
+typedef struct {
+    WAVFILE *wav;
+    time_t duration_s;
+} i2s_record_params_t;
 
 void i2s_record(void *arg) {
+    i2s_record_params_t *rec = (i2s_record_params_t *)arg;
+
     uint16_t i2s_read_buff[BUFFER_SIZE];
     size_t bytes_read;
 
-    time_t record_duration_s = 5;
-    size_t bytes_missing = record_duration_s * SAMPLE_RATE * SAMPLE_DEPTH / 8;
-    log_i("Recording %u seconds, %lu bytes, buffer %p", record_duration_s,
+    size_t bytes_missing = rec->duration_s * SAMPLE_RATE * SAMPLE_DEPTH / 8;
+    log_i("Recording %u seconds, %lu bytes, buffer %p", rec->duration_s,
           bytes_missing, i2s_read_buff);
 
     i2s_adc_enable(I2S_NUM_0);
@@ -88,19 +89,72 @@ void i2s_record(void *arg) {
               i2s_read_buff[(bytes_read / (SAMPLE_DEPTH * 8)) - 1]);
 
         // write bytes to sd card
-        fwrite(i2s_read_buff, bytes_read, 1, wf->fp);
-        wf->data_byte_count += bytes_read;
-        wf->data_checked = true;
+        fwrite(i2s_read_buff, bytes_read, 1, rec->wav->fp);
+        rec->wav->data_byte_count += bytes_read;
+        rec->wav->data_checked = true;
 
         bytes_missing -= bytes_read;
     }
 
     i2s_adc_disable(I2S_NUM_0);
 
-    log_i("Recording finished, wrote %u bytes total", wf->data_byte_count);
-    wavfile_close(wf);
+    log_i("Recording finished, wrote %u bytes total",
+          rec->wav->data_byte_count);
+    wavfile_close(rec->wav);
+    free(rec);
 
     vTaskDelete(NULL);
+}
+
+TaskHandle_t start_record(char *file_path, time_t duration_s) {
+    TaskHandle_t task = NULL;
+    WAVFILE *wav;
+    WavFileResult error;
+    char error_buf[BUFSIZ];
+
+    // init wavfile
+    wav = wavfile_open(file_path, WavFileModeWrite, &error);
+    if (error) {
+        wavfile_result_string(error, error_buf, BUFSIZ);
+        log_e("error opening wav file: %s", error_buf);
+        return task;
+    }
+
+    error = wavfile_write_info(wav, &info);
+    if (error) {
+        wavfile_result_string(error, error_buf, BUFSIZ);
+        log_e("error writing wav info: %s", error_buf);
+        return task;
+    }
+
+    // install and start i2s driver
+    esp_log_level_set("I2S", ESP_LOG_INFO);
+    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
+
+    // init ADC pad
+    i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_0);
+    adc1_config_width(ADC_WIDTH_BIT_12);
+    adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
+
+    // init array
+    i2s_record_params_t *params =
+        (i2s_record_params_t *)malloc(sizeof(i2s_record_params_t));
+
+    params->duration_s = duration_s;
+    params->wav = wav;
+
+    char task_name[BUFSIZ];
+    snprintf(task_name, BUFSIZ, "i2s_record(%lu, \"%s\")", duration_s,
+             file_path);
+
+    // start actual recording task
+    log_i("Starting recording task: %s", task_name);
+    BaseType_t task_status = xTaskCreate(i2s_record, "task_name",
+                                         BUFFER_BYTES + 2048, params, 5, &task);
+    if (task_status != pdPASS)
+        log_e("Record task failed, check memory.");
+
+    return task;
 }
 
 int findWavPath(char *wavFilePath, size_t len) {
@@ -147,37 +201,8 @@ void setup() {
         log_e("Could not find wav path.");
     }
 
-    // init wavfile
-    wf = wavfile_open(wavFilePath, WavFileModeWrite, &error);
-    if (error) {
-        wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
-        log_e("error opening wav file: %s", wavfile_error_buf);
-        return;
-    }
-
-    error = wavfile_write_info(wf, &info);
-    if (error) {
-        wavfile_result_string(error, wavfile_error_buf, BUFSIZ);
-        log_e("error writing wav info: %s", wavfile_error_buf);
-        return;
-    }
-
-    // install and start i2s driver
-    esp_log_level_set("I2S", ESP_LOG_INFO);
-    i2s_driver_install(I2S_NUM_0, &i2s_config, 0, NULL);
-
-    // init ADC pad
-    i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_0);
-    // i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, SAMPLE_DEPTH, I2S_CHANNEL_MONO);
-
-    adc1_config_width(ADC_WIDTH_BIT_12);
-    adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
-
-    BaseType_t task_status = xTaskCreate(i2s_record, "i2s_record",
-                                         BUFFER_BYTES + 2048, NULL, 5, NULL);
-    if (task_status != pdPASS) {
-        log_e("Record task failed, check memory.");
-    }
+    // start recording
+    TaskHandle_t rec_task = start_record(wavFilePath, 5);
 
     log_i("Init completed.");
 }
