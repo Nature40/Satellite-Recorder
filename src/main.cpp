@@ -19,10 +19,10 @@
 
 #include "wavfile.h"
 
-#define SAMPLE_RATE (48000)
+#define SAMPLE_RATE (500000)
 #define SAMPLE_DEPTH I2S_BITS_PER_SAMPLE_16BIT
-#define BUFFER_SIZE (SAMPLE_RATE)
-#define BUFFER_BYTES (BUFFER_SIZE * SAMPLE_DEPTH / 8)
+#define BUFFER_SIZE (20000)
+#define BUFFER_BYTES (BUFFER_SIZE * (SAMPLE_DEPTH / 8))
 
 // I2S driver
 i2s_config_t i2s_config = {
@@ -34,7 +34,9 @@ i2s_config_t i2s_config = {
     .intr_alloc_flags = 0,
     .dma_buf_count = 8,
     .dma_buf_len = 1024,
-    .use_apll = 1,
+    // .use_apll = 1,
+    // .tx_desc_auto_clear = true,
+    // .fixed_mclk = SAMPLE_RATE,
 };
 
 // wav info
@@ -60,28 +62,42 @@ WavFileResult error;
 char wavfile_error_buf[BUFSIZ];
 
 void i2s_record(void *arg) {
+    uint16_t i2s_read_buff[BUFFER_SIZE];
     size_t bytes_read;
 
-    uint16_t i2s_read_buff[BUFFER_SIZE];
-    long start_ts = millis();
+    time_t record_duration_s = 5;
+    size_t bytes_missing = record_duration_s * SAMPLE_RATE * SAMPLE_DEPTH / 8;
+    log_i("Recording %u seconds, %lu bytes, buffer %p", record_duration_s,
+          bytes_missing, i2s_read_buff);
 
     i2s_adc_enable(I2S_NUM_0);
-    for (int i = 0; i < 100; i++) {
-        i2s_read(I2S_NUM_0, &i2s_read_buff, BUFFER_BYTES, &bytes_read,
+
+    while (bytes_missing > 0) {
+        // record BUFFER_BYTES at maximum or the missing bytes
+        bytes_read =
+            (bytes_missing < BUFFER_BYTES) ? bytes_missing : BUFFER_BYTES;
+
+        log_i("trying to read %u bytes", bytes_read);
+
+        // read the values
+        i2s_read(I2S_NUM_0, &i2s_read_buff, bytes_read, &bytes_read,
                  portMAX_DELAY);
 
-        log_i("%05lu: read %u bytes via I2S, samples: %i %i %i ... %i",
-              millis() - start_ts, bytes_read, i2s_read_buff[0],
-              i2s_read_buff[1], i2s_read_buff[2],
-              i2s_read_buff[BUFFER_SIZE - 1]);
+        log_i("read %u bytes via I2S, samples: %i %i %i ... %i", bytes_read,
+              i2s_read_buff[0], i2s_read_buff[1], i2s_read_buff[2],
+              i2s_read_buff[(bytes_read / (SAMPLE_DEPTH * 8)) - 1]);
 
+        // write bytes to sd card
         fwrite(i2s_read_buff, bytes_read, 1, wf->fp);
         wf->data_byte_count += bytes_read;
         wf->data_checked = true;
+
+        bytes_missing -= bytes_read;
     }
+
     i2s_adc_disable(I2S_NUM_0);
 
-    log_i("Recording finished.");
+    log_i("Recording finished, wrote %u bytes total", wf->data_byte_count);
     wavfile_close(wf);
 
     vTaskDelete(NULL);
@@ -152,12 +168,16 @@ void setup() {
 
     // init ADC pad
     i2s_set_adc_mode(ADC_UNIT_1, ADC1_CHANNEL_0);
-    i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, SAMPLE_DEPTH, I2S_CHANNEL_MONO);
+    // i2s_set_clk(I2S_NUM_0, SAMPLE_RATE, SAMPLE_DEPTH, I2S_CHANNEL_MONO);
 
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC1_CHANNEL_0, ADC_ATTEN_DB_0);
 
-    xTaskCreate(i2s_record, "i2s_record", BUFFER_BYTES + 2048, NULL, 5, NULL);
+    BaseType_t task_status = xTaskCreate(i2s_record, "i2s_record",
+                                         BUFFER_BYTES + 2048, NULL, 5, NULL);
+    if (task_status != pdPASS) {
+        log_e("Record task failed, check memory.");
+    }
 
     log_i("Init completed.");
 }
